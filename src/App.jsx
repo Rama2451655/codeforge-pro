@@ -535,13 +535,180 @@ function Editor({filename,content,onChange,fontSize}){
 }
 
 // ── Terminal ──────────────────────────────────────────────────
-function Term({lines,onRun,input,setInput,running}){
+// ── RK Browser ───────────────────────────────────────────────
+function RKBrowser({initUrl,onClose}){
+  const[url,setUrl]=useState(initUrl||"https://www.google.com/webhp?igu=1");
+  const[input,setInput]=useState(initUrl||"");
+  const[loading,setLoading]=useState(true);
+  const[canBack,setCanBack]=useState(false);
+  const[canFwd,setCanFwd]=useState(false);
+  const iframeRef=useRef(null);
+  const historyRef=useRef([initUrl||"https://www.google.com"]);
+  const histIdxRef=useRef(0);
+
+  const navigate=(dest)=>{
+    let u=dest.trim();
+    if(!u)return;
+    // If it looks like a search query, use Google
+    if(!u.startsWith("http")&&!u.startsWith("//")){
+      if(u.includes(".")){u="https://"+u;}
+      else{u="https://www.google.com/search?q="+encodeURIComponent(u)+"&igu=1";}
+    }
+    // Remove history after current index
+    historyRef.current=historyRef.current.slice(0,histIdxRef.current+1);
+    historyRef.current.push(u);
+    histIdxRef.current=historyRef.current.length-1;
+    setUrl(u);setInput(u);setLoading(true);
+    setCanBack(histIdxRef.current>0);
+    setCanFwd(histIdxRef.current<historyRef.current.length-1);
+  };
+
+  const goBack=()=>{
+    if(histIdxRef.current>0){
+      histIdxRef.current--;
+      const u=historyRef.current[histIdxRef.current];
+      setUrl(u);setInput(u);setLoading(true);
+      setCanBack(histIdxRef.current>0);
+      setCanFwd(true);
+    }
+  };
+
+  const goFwd=()=>{
+    if(histIdxRef.current<historyRef.current.length-1){
+      histIdxRef.current++;
+      const u=historyRef.current[histIdxRef.current];
+      setUrl(u);setInput(u);setLoading(true);
+      setCanBack(true);
+      setCanFwd(histIdxRef.current<historyRef.current.length-1);
+    }
+  };
+
+  const refresh=()=>{setLoading(true);setUrl(u=>u+"");if(iframeRef.current)iframeRef.current.src=url;};
+
+  const quickLinks=[
+    {l:"Google",     u:"https://www.google.com/webhp?igu=1"},
+    {l:"GitHub",     u:"https://github.com"},
+    {l:"MDN",        u:"https://developer.mozilla.org"},
+    {l:"npm",        u:"https://npmjs.com"},
+    {l:"StackOverflow",u:"https://stackoverflow.com"},
+    {l:"Vercel",     u:"https://vercel.com"},
+    {l:"localhost:5173",u:"http://localhost:5173"},
+    {l:"localhost:3000",u:"http://localhost:3000"},
+  ];
+
+  return(
+    <div style={{position:"fixed",inset:0,background:D.bg,zIndex:900,display:"flex",flexDirection:"column"}}>
+      {/* Browser toolbar */}
+      <div style={{height:50,background:"#1a1a2e",borderBottom:`1px solid ${D.bdr}`,display:"flex",alignItems:"center",gap:6,padding:"0 8px",flexShrink:0}}>
+        {/* Traffic lights */}
+        <div style={{display:"flex",gap:4,flexShrink:0}}>
+          {["#ff5f57","#febc2e","#28c840"].map((c,i)=><div key={i} style={{width:10,height:10,borderRadius:"50%",background:c}}/>)}
+        </div>
+        {/* Back/Fwd/Refresh */}
+        <button onClick={goBack} disabled={!canBack} style={{background:"none",border:"none",color:canBack?D.txt:D.dim,cursor:canBack?"pointer":"default",fontSize:18,padding:"4px 6px",flexShrink:0}}>‹</button>
+        <button onClick={goFwd}  disabled={!canFwd}  style={{background:"none",border:"none",color:canFwd?D.txt:D.dim,cursor:canFwd?"pointer":"default",fontSize:18,padding:"4px 6px",flexShrink:0}}>›</button>
+        <button onClick={refresh} style={{background:"none",border:"none",color:D.dim,cursor:"pointer",fontSize:14,padding:"4px 6px",flexShrink:0}}>↻</button>
+        {/* Address bar */}
+        <form onSubmit={e=>{e.preventDefault();navigate(input);}} style={{flex:1,display:"flex",alignItems:"center",gap:6}}>
+          <div style={{flex:1,display:"flex",alignItems:"center",background:"#0d0d1a",border:`1px solid ${D.bdr}`,borderRadius:20,padding:"0 12px",height:34}}>
+            <span style={{fontSize:13,marginRight:6,flexShrink:0}}>
+              {url.startsWith("https")?"🔒":url.startsWith("http://localhost")?"💻":"🌐"}
+            </span>
+            <input
+              value={input}
+              onChange={e=>setInput(e.target.value)}
+              onFocus={e=>e.target.select()}
+              placeholder="Search or enter URL..."
+              style={{flex:1,background:"transparent",border:"none",outline:"none",color:D.txt,fontSize:13,fontFamily:"inherit"}}/>
+            {input&&<button type="button" onClick={()=>setInput("")} style={{background:"none",border:"none",color:D.dim,cursor:"pointer",fontSize:14,padding:"0 2px",flexShrink:0}}>✕</button>}
+          </div>
+          <button type="submit" style={{background:D.ac,border:"none",borderRadius:8,padding:"6px 12px",color:"#fff",fontSize:12,cursor:"pointer",flexShrink:0}}>Go</button>
+        </form>
+        {/* Close */}
+        <button onClick={onClose} style={{background:`${D.red}22`,border:`1px solid ${D.red}44`,borderRadius:6,padding:"5px 10px",color:D.red,cursor:"pointer",fontSize:12,fontWeight:700,flexShrink:0}}>✕ Close</button>
+      </div>
+
+      {/* RK Browser brand bar */}
+      <div style={{height:28,background:"linear-gradient(135deg,#0d0d2e,#1a1a4e)",display:"flex",alignItems:"center",padding:"0 12px",gap:8,flexShrink:0,borderBottom:`1px solid #333`}}>
+        <span style={{fontSize:14}}>🌐</span>
+        <span style={{fontSize:12,fontWeight:700,color:"#4fc3f7",letterSpacing:".05em"}}>RK Browser</span>
+        <span style={{fontSize:11,color:"#666",marginLeft:4}}>— Built into CodeForge Pro</span>
+        {loading&&<span style={{fontSize:11,color:D.ac,marginLeft:"auto",animation:"blink 1s infinite"}}>Loading...</span>}
+      </div>
+
+      {/* Quick links */}
+      <div style={{height:36,background:"#111",borderBottom:`1px solid ${D.bdr}`,display:"flex",alignItems:"center",gap:4,padding:"0 8px",overflow:"auto",flexShrink:0}}>
+        {quickLinks.map(({l,u})=>(
+          <button key={l} onClick={()=>navigate(u)} style={{background:url===u?`${D.ac}33`:"#1a1a1a",border:`1px solid ${url===u?D.ac:D.bdr}`,borderRadius:12,padding:"3px 10px",color:url===u?D.ac:D.dim,cursor:"pointer",fontSize:11,whiteSpace:"nowrap",flexShrink:0}}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      {/* iframe */}
+      <div style={{flex:1,position:"relative",overflow:"hidden"}}>
+        {loading&&(
+          <div style={{position:"absolute",inset:0,background:D.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,zIndex:1}}>
+            <div style={{fontSize:36}}>🌐</div>
+            <div style={{color:D.txt,fontSize:14,fontWeight:600}}>{url}</div>
+            <div style={{display:"flex",gap:6}}>{[0,1,2].map(i=><div key={i} style={{width:8,height:8,borderRadius:"50%",background:D.ac,animation:`pulse 1s ${i*.2}s infinite`}}/>)}</div>
+            <div style={{color:D.dim,fontSize:12,textAlign:"center",maxWidth:280,lineHeight:1.6}}>
+              Loading page...<br/>
+              <span style={{fontSize:11}}>If blocked, the site doesn't allow iframes.<br/>Try opening in external browser.</span>
+            </div>
+            <button onClick={()=>window.open(url,"_blank")} style={{background:`${D.ac}22`,border:`1px solid ${D.ac}`,borderRadius:8,padding:"8px 16px",color:D.ac,cursor:"pointer",fontSize:13}}>
+              Open in External Browser ↗
+            </button>
+          </div>
+        )}
+        <iframe
+          ref={iframeRef}
+          src={url}
+          style={{width:"100%",height:"100%",border:"none",display:loading?"none":"block"}}
+          onLoad={()=>setLoading(false)}
+          onError={()=>setLoading(false)}
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+          title="RK Browser"
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Terminal with clickable links ─────────────────────────────
+function Term({lines,onRun,input,setInput,running,onOpenBrowser}){
   const r=useRef(null);
   useEffect(()=>r.current?.scrollIntoView({behavior:"smooth"}),[lines]);
   const C={sys:D.ac,inf:D.blu,out:D.txt,grn:D.grn,red:D.red,yel:D.yel,dim:D.dim,acb:D.acb};
+
+  // Detect URLs in line text and make them clickable
+  const renderLine=(text,color)=>{
+    const urlReg=/(https?:\/\/[^\s]+|http:\/\/localhost:[0-9]+[^\s]*)/g;
+    const parts=[];let last=0;let m;
+    while((m=urlReg.exec(text))!==null){
+      if(m.index>last)parts.push(<span key={last}>{text.slice(last,m.index)}</span>);
+      const u=m[0];
+      parts.push(
+        <span key={m.index}
+          onClick={()=>onOpenBrowser&&onOpenBrowser(u)}
+          style={{color:D.acb,textDecoration:"underline",cursor:"pointer",fontWeight:600}}
+          title={`Open ${u} in RK Browser`}>
+          {u} 🌐
+        </span>
+      );
+      last=m.index+u.length;
+    }
+    if(last<text.length)parts.push(<span key={last}>{text.slice(last)}</span>);
+    return parts.length>0?parts:text;
+  };
+
   return(<div style={{display:"flex",flexDirection:"column",height:"100%",background:"#141414"}}>
     <div style={{flex:1,overflow:"auto",padding:"6px 12px",fontFamily:"'JetBrains Mono',monospace",fontSize:12,lineHeight:1.7,WebkitOverflowScrolling:"touch"}}>
-      {lines.map((l,i)=><div key={i} style={{color:C[l.t]||D.txt,whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{l.v}</div>)}
+      {lines.map((l,i)=>(
+        <div key={i} style={{color:C[l.t]||D.txt,whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
+          {renderLine(l.v, C[l.t]||D.txt)}
+        </div>
+      ))}
       <div ref={r}/>
     </div>
     <div style={{display:"flex",alignItems:"center",borderTop:`1px solid ${D.bdr}`,padding:"6px 10px",gap:6,background:D.bg}}>
@@ -757,6 +924,7 @@ export default function App(){
   const[dm,setDm]            =useState(false);
   const[zoom,setZoom]        =useState(1);
   const[openMenu,setOpenMenu]=useState(null);
+  const[browser,setBrowser]  =useState(null); // null or URL string
   const[cfg,setCfg]          =useState({fontSize:13,tabSize:2,wordWrap:true,autoSave:true,lineNumbers:true});
 
   // Hidden file inputs for Open File / Open Folder
@@ -1142,6 +1310,7 @@ export default function App(){
 
   const doAct=useCallback((act)=>{
     if(["files","search","git","extensions","ai","settings"].includes(act)){setPanel(act);setSbOpen(true);return;}
+    if(act==="browser")      {setBrowser("https://www.google.com/webhp?igu=1");return;}
     if(act==="open-file")   {fileInputRef.current?.click();return;}
     if(act==="open-folder") {openFolderPicker();return;}
     if(act==="paste-code")  {setShowPaste("paste");return;}
@@ -1231,6 +1400,7 @@ export default function App(){
           <button onClick={()=>doAct("zoom-reset")} style={{background:D.inp,border:`1px solid ${D.bdr}`,borderRadius:4,padding:"3px 8px",color:zoom!==1?D.ac:D.dim,cursor:"pointer",fontSize:11,minWidth:38,textAlign:"center"}}>{Math.round(zoom*100)}%</button>
           <button onClick={()=>doAct("zoom-in")} style={{background:D.inp,border:`1px solid ${D.bdr}`,borderRadius:4,padding:"3px 8px",color:D.txt,cursor:"pointer",fontSize:15}}>+</button>
           <button onClick={()=>setShowCmd(true)} style={{background:D.inp,border:`1px solid ${D.bdr}44`,borderRadius:6,padding:"4px 10px",color:D.dim,fontSize:12,cursor:"pointer"}}>⌘⇧P</button>
+          <button onClick={()=>setBrowser("https://www.google.com/webhp?igu=1")} style={{background:"#4fc3f722",border:"1px solid #4fc3f755",borderRadius:4,color:"#4fc3f7",cursor:"pointer",padding:"4px 10px",fontSize:11,fontWeight:600}}>🌐 RK</button>
           <button onClick={()=>setShowDep(true)} style={{background:`${D.ac}22`,border:`1px solid ${D.ac}55`,borderRadius:4,color:D.ac,cursor:"pointer",padding:"4px 10px",fontSize:11,fontWeight:600}}>🚀</button>
         </div>
       </div>
@@ -1430,7 +1600,7 @@ export default function App(){
               <button onClick={()=>setTermH(h=>h===200?360:200)} style={{background:"none",border:"none",color:D.dim,cursor:"pointer",fontSize:14}}>⬜</button>
               <button onClick={()=>setTO(false)} style={{background:"none",border:"none",color:D.dim,cursor:"pointer",fontSize:18}}>✕</button>
             </div>
-            <Term lines={tLines} onRun={runTerm} input={tInput} setInput={setTInput} running={tRun}/>
+            <Term lines={tLines} onRun={runTerm} input={tInput} setInput={setTInput} running={tRun} onOpenBrowser={(u)=>setBrowser(u)}/>
           </div>}
         </div>
       </div>
@@ -1453,6 +1623,10 @@ export default function App(){
             <span style={{fontSize:20}}>🚀</span>
             <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:".04em"}}>Deploy</span>
           </button>
+          <button onClick={()=>setBrowser("https://www.google.com/webhp?igu=1")} style={{flex:1,background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,color:"#4fc3f7"}}>
+            <span style={{fontSize:20}}>🌐</span>
+            <span style={{fontSize:9,textTransform:"uppercase",letterSpacing:".04em"}}>Browser</span>
+          </button>
         </div>
       )}
 
@@ -1472,6 +1646,7 @@ export default function App(){
         {notifs.map(n=><div key={n.id} style={{background:D.sb,border:`1px solid ${n.type==="success"?D.grn:n.type==="error"?D.red:D.bdr}`,borderRadius:8,padding:"10px 14px",fontSize:13,color:D.txt,maxWidth:270,animation:"fadeUp .3s ease",boxShadow:"0 4px 20px #0008"}}>{n.type==="success"?"✅ ":n.type==="error"?"❌ ":"ℹ️ "}{n.msg}</div>)}
       </div>
 
+      {browser&&<RKBrowser initUrl={browser} onClose={()=>setBrowser(null)}/>}
       {ctx&&<CtxMenu x={ctx.x} y={ctx.y} items={ctx.items} onClose={()=>setCtx(null)}/>}
       {showCmd&&<CmdPalette onClose={()=>setShowCmd(false)} onCmd={id=>{doAct(id);}}/>}
       {showDep&&<DeployModal onClose={()=>setShowDep(false)}/>}
