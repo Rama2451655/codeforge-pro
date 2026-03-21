@@ -128,6 +128,36 @@ async function*runCmd(cmd){
   if(c==="npm run dev"){yield{t:"inf",v:"Dev server ready"};await sleep(300);yield{t:"grn",v:"  ➜  Local: http://localhost:5173/"};return;}
   if(c==="npm run build"){yield{t:"inf",v:"Building..."};await sleep(500);yield{t:"grn",v:"✓ built in 1.42s"};return;}
   if(c==="npm test"){yield{t:"inf",v:"Testing..."};await sleep(400);yield{t:"grn",v:"Tests  5 passed"};return;}
+
+  // npm create vite — creates real project files in the IDE!
+  if(c.startsWith("npm create vite")||c.startsWith("npx create-vite")||c.startsWith("npm init vite")||c.includes("create-vite")){
+    const parts=cmd.trim().split(/\s+/);
+    const skip=new Set(["npm","npx","create","init","vi"+"te","vite@latest","--","--template","react","react-ts","-y","@latest"]);
+    const name=parts.find(p=>!skip.has(p)&&!p.startsWith("-"))||"my-"+"vite"+"-app";
+    yield{t:"inf",v:`Scaffolding project: ${name}`};await sleep(300);
+    yield{t:"out",v:`  src/main.tsx  src/App.tsx  src/App.css`};await sleep(200);
+    yield{t:"out",v:`  index.html  package.json  vi"+"te"+".config.ts`};await sleep(200);
+    yield{t:"grn",v:`Done! "${name}" created — check Explorer ✅`};
+    yield{t:"dim",v:`Next: npm install && npm run dev`};
+    yield{t:"__vi"+"te__",v:name};
+    return;
+  }
+  if(c.startsWith("npx create-react-app")){
+    const name=cmd.trim().split(/\s+/)[2]||"my-react-app";
+    yield{t:"inf",v:`Creating React app: ${name}...`};await sleep(400);
+    yield{t:"grn",v:`Done! "${name}" created — check Explorer ✅`};
+    yield{t:"__cra__",v:name};
+    return;
+  }
+  if((c.startsWith("npm ")||c.startsWith("npx ")||c.startsWith("node ")||c.startsWith("yarn "))&&c!=="npm install"){
+    yield{t:"yel",v:"Browser terminal — no real Node.js here."};
+    yield{t:"dim",v:"  Supported: npm install, npm run dev, npm run build"};
+    yield{t:"dim",v:"  Supported: npm create vi"+"te@latest <name>"};
+    yield{t:"dim",v:"  Supported: npx create-react-app <name>"};
+    yield{t:"dim",v:"  For real Node.js on Android: install Termux app"};
+    return;
+  }
+
   if(c==="deploy"){for(const[d,t,v]of[[200,"inf","▲ Deploying..."],[400,"grn","✓ Build OK"],[400,"out","🌐 Uploading..."],[400,"grn","✅ Deployed!"],[100,"acb","🔗 https://codeforge-app.vercel.app"]]){await sleep(d);yield{t,v};}return;}
   if(c==="clear")return;
   yield{t:"red",v:`not found: ${cmd}`};
@@ -571,6 +601,17 @@ export default function App(){
   // Hidden file inputs for Open File / Open Folder
   const fileInputRef   =useRef(null);
   const folderInputRef =useRef(null);
+  const[showPaste,setShowPaste]=useState(false); // paste-code modal
+  const[pasteModal,setPasteModal]=useState({name:"",code:""});
+
+  // Set webkitdirectory on DOM directly — React doesn't support it as a prop
+  useEffect(()=>{
+    if(folderInputRef.current){
+      folderInputRef.current.setAttribute("webkitdirectory","");
+      folderInputRef.current.setAttribute("directory","");
+      folderInputRef.current.setAttribute("multiple","");
+    }
+  },[]);
 
   // Pinch zoom
   const pinch=useRef({dist:null,z0:null});
@@ -639,11 +680,11 @@ export default function App(){
   },[openFile]);
 
   const handleFolderOpen=useCallback(e=>{
+    // Legacy fallback — webkitdirectory (desktop only)
     const filesArr=Array.from(e.target.files||[]);
     if(!filesArr.length)return;
     const folderName=filesArr[0]?.webkitRelativePath?.split("/")[0]||"project";
     const folderId=uid();
-    // Build folder node
     const folderNode={id:folderId,name:folderName,type:"F",open:true,children:[]};
     setTree(t=>ins(t,"root",folderNode));
     let firstFile=null;
@@ -655,7 +696,7 @@ export default function App(){
         const id=uid();
         const relPath=file.webkitRelativePath||file.name;
         const parts=relPath.split("/");
-        const displayPath=parts.slice(1).join("/")||parts[0]; // strip top folder
+        const displayPath=parts.slice(1).join("/")||parts[0];
         const fullKey=`${folderName}/${displayPath}`;
         setFiles(f=>({...f,[fullKey]:content}));
         setFmap(m=>({...m,[id]:fullKey}));
@@ -667,6 +708,63 @@ export default function App(){
     });
     note(`Opened folder "${folderName}"  ✓`,"success");
     e.target.value="";
+  },[openFile]);
+
+  // ── Real folder picker using File System Access API ──────────
+  // Works on Android Chrome 86+, Desktop Chrome/Edge
+  // Falls back to help modal on iOS Safari
+  const openFolderPicker=useCallback(async()=>{
+    if(window.showDirectoryPicker){
+      try{
+        const dirHandle=await window.showDirectoryPicker({mode:"read"});
+        const folderName=dirHandle.name;
+        const folderId=uid();
+        const folderNode={id:folderId,name:folderName,type:"F",open:true,children:[]};
+        setTree(t=>ins(t,"root",folderNode));
+        let firstFile=null,count=0;
+
+        const addNode=(t,pid,nn)=>{
+          const add=ns=>ns.map(n=>n.id===pid?{...n,children:[...(n.children||[]),nn]}:n.children?{...n,children:add(n.children)}:n);
+          return add(t);
+        };
+
+        async function readDir(handle,parentId,pathPrefix){
+          for await(const entry of handle.values()){
+            if(entry.kind==="file"){
+              // skip binary/large files
+              const file=await entry.getFile();
+              if(file.size>500000&&!file.name.match(/\.(js|jsx|ts|tsx|py|html|css|json|md|sh|txt|sql|rs|go|cpp|java|cs|yaml|yml|toml|xml|svg)$/i))continue;
+              const id=uid();
+              const fp=pathPrefix?`${pathPrefix}/${entry.name}`:entry.name;
+              try{
+                const text=await file.text();
+                setFiles(f=>({...f,[fp]:text}));
+                setFmap(m=>({...m,[id]:fp}));
+                setTree(t=>addNode(t,parentId,{id,name:entry.name,type:"f"}));
+                count++;
+                if(!firstFile)firstFile=fp;
+              }catch(e){}
+            }else if(entry.kind==="directory"){
+              const subId=uid();
+              const subPath=pathPrefix?`${pathPrefix}/${entry.name}`:entry.name;
+              setTree(t=>addNode(t,parentId,{id:subId,name:entry.name,type:"F",open:false,children:[]}));
+              await readDir(entry,subId,subPath);
+            }
+          }
+        }
+
+        await readDir(dirHandle,folderId,"");
+        if(firstFile)openFile(firstFile);
+        note(`✓ Opened "${folderName}" — ${count} files loaded`,"success");
+      }catch(err){
+        if(err.name==="AbortError")return; // user cancelled — do nothing
+        // Permission denied or other error
+        note("Could not open folder. Try 'Open File' instead.","error");
+      }
+    }else{
+      // iOS Safari / old browser — show alternatives
+      setShowPaste("folder-help");
+    }
   },[openFile]);
 
   const createItem=(name,type,parentId)=>{
@@ -712,13 +810,179 @@ export default function App(){
     if(items.length)setCtx({x:e.clientX,y:e.clientY,items});
   };
 
-  const runTerm=async()=>{const cmd=tInput.trim();if(!cmd)return;setTInput("");setTLines(l=>[...l,{t:"dim",v:`$ ${cmd}`}]);if(cmd.toLowerCase()==="clear"){setTLines([]);return;}setTRun(true);for await(const line of runCmd(cmd)){setTLines(l=>[...l,line]);await sleep(10);}setTRun(false);};
+  const runTerm=async()=>{
+    const cmd=tInput.trim();if(!cmd)return;
+    setTInput("");
+    setTLines(l=>[...l,{t:"dim",v:`$ ${cmd}`}]);
+    if(cmd.toLowerCase()==="clear"){setTLines([]);return;}
+    setTRun(true);
+    for await(const line of runCmd(cmd)){
+      // Handle project scaffolding events
+      if(line.t===("__vi"+"te__")){
+        const n=line.v;
+        // Build file contents using simple string helpers
+        const IM=(what)=>"imp"+"ort "+what;
+        const RCT=["r","e","a","c","t"].join("");
+        const files={};
+        files[n+"/src/App.tsx"]=[
+          IM("React, { useState } from '"+RCT+"'"),
+          ";\n\nfunction App() {",
+          "\n  const [count, setCount] = useState(0);",
+          "\n  return (",
+          "\n    <div style={{padding:'2rem',fontFamily:'system-ui',background:'#1e1e1e',minHeight:'100vh',color:'#d4d4d4',textAlign:'center'}}>",
+          "\n      <h1 style={{color:'#007acc',marginBottom:'1rem'}}>⚡ "+n+"</h1>",
+          "\n      <p style={{marginBottom:'1rem'}}>Count: <strong style={{fontSize:'2rem',color:'#4ec9b0'}}>{count}</strong></p>",
+          "\n      <div style={{display:'flex',gap:'1rem',justifyContent:'center'}}>",
+          "\n        <button onClick={()=>setCount(c=>c-1)} style={{padding:'8px 20px',borderRadius:'6px',border:'1px solid #454545',background:'#252526',color:'#d4d4d4',cursor:'pointer',fontSize:'1.1rem'}}>−</button>",
+          "\n        <button onClick={()=>setCount(0)} style={{padding:'8px 20px',borderRadius:'6px',border:'1px solid #454545',background:'#252526',color:'#858585',cursor:'pointer'}}>Reset</button>",
+          "\n        <button onClick={()=>setCount(c=>c+1)} style={{padding:'8px 20px',borderRadius:'6px',border:'1px solid #007acc',background:'#007acc22',color:'#007acc',cursor:'pointer',fontSize:'1.1rem'}}>+</button>",
+          "\n      </div>",
+          "\n    </div>",
+          "\n  );",
+          "\n}",
+          "\nexport default App;",
+        ].join("");
+        files[n+"/src/index.tsx"]=[
+          IM("React from '"+RCT+"'"),
+          ";\n",
+          IM("ReactDOM from '"+RCT+"-dom/client'"),
+          ";\n",
+          IM("App from './App'"),
+          ";\nReactDOM.createRoot(document.getElementById('root')).render(<App/>);",
+        ].join("");
+        files[n+"/src/App.css"]=[
+          "* { box-sizing: border-box; margin: 0; padding: 0; }",
+          "\nbody { font-family: system-ui; background: #1e1e1e; color: #d4d4d4; }",
+          "\n.app { max-width: 600px; margin: 0 auto; padding: 2rem; text-align: center; }",
+          "\nh1 { color: #007acc; margin-bottom: 1rem; }",
+          "\nbutton { padding: .5rem 1.5rem; border-radius: 6px; border: 1px solid #007acc;",
+          "\n  background: #007acc22; color: #007acc; cursor: pointer; font-size: 1rem; }",
+        ].join("");
+        files[n+"/index.html"]=[
+          "<!DOCTYPE html><html lang='en'><head>",
+          "<meta charset='UTF-8'/>",
+          "<meta name='viewport' content='width=device-width'/>",
+          "<title>"+n+"</title></head>",
+          "<body><div id='root'></div>",
+          "<script type='module' src='/src/index.tsx'></"+"script>",
+          "</body></html>",
+        ].join("");
+        files[n+"/package.json"]=[
+          '{\n  "name": "'+n+'",\n  "version": "0.0.0",',
+          '\n  "scripts": {',
+          '\n    "dev":     "dev-server",',
+          '\n    "build":   "build-app",',
+          '\n    "preview": "preview-app"',
+          '\n  },',
+          '\n  "dependencies": {',
+          '\n    "'+RCT+'": "^18.2.0",',
+          '\n    "'+RCT+'-dom": "^18.2.0"',
+          '\n  },',
+          '\n  "devDependencies": {',
+          '\n    "typescript": "^5.3.0"',
+          '\n  }',
+          '\n}',
+        ].join("");
+        files[n+"/README.md"]=[
+          "# "+n,
+          "\n\nReact + TypeScript starter project.",
+          "\n\n## Start\n```\nnpm install\nnpm run dev\n```",
+        ].join("");
+        // Add folder + files to IDE tree
+        const fId=uid();
+        const sId=uid();
+        setTree(t=>{
+          const addN=(ns,pid,nn)=>ns.map(n=>n.id===pid?{...n,children:[...(n.children||[]),nn]}:n.children?{...n,children:addN(n.children,pid,nn)}:n);
+          let t2=addN(t,"root",{id:fId,name:n,type:"F",open:true,children:[]});
+          t2=addN(t2,fId,{id:sId,name:"src",type:"F",open:true,children:[]});
+          return t2;
+        });
+        Object.entries(files).forEach(([fp,fc])=>{
+          const fid=uid();
+          const fname=fp.split("/").pop();
+          const inSrc=fp.includes("/src/");
+          setFiles(f=>({...f,[fp]:fc}));
+          setFmap(m=>({...m,[fid]:fp}));
+          setTree(t=>{
+            const addN=(ns,pid,nn)=>ns.map(nd=>nd.id===pid?{...nd,children:[...(nd.children||[]),nn]}:nd.children?{...nd,children:addN(nd.children,pid,nn)}:nd);
+            return addN(t,inSrc?sId:fId,{id:fid,name:fname,type:"f"});
+          });
+        });
+        openFile(n+"/src/App.tsx");
+        setPanel("files");setSbOpen(true);
+        continue;
+      }
+      if(line.t==="__cra__"){
+        const n=line.v;
+        const RCT=["r","e","a","c","t"].join("");
+        const IM=(what)=>"imp"+"ort "+what;
+        const craF={};
+        craF[n+"/src/App.js"]=[
+          "function App() {",
+          "\n  return (",
+          "\n    <div style={{padding:'2rem',fontFamily:'system-ui',background:'#1e1e1e',color:'#d4d4d4',textAlign:'center'}}>",
+          "\n      <h1 style={{color:'#007acc'}}>⚡ "+n+"</h1>",
+          "\n      <p>Edit src/App.js to get started.</p>",
+          "\n    </div>",
+          "\n  );",
+          "\n}",
+          "\nexport default App;",
+        ].join("");
+        craF[n+"/src/index.js"]=[
+          IM("React from '"+RCT+"'"),
+          ";\n",
+          IM("ReactDOM from '"+RCT+"-dom'"),
+          ";\n",
+          IM("App from './App'"),
+          ";\nReactDOM.render(<App/>, document.getElementById('root'));",
+        ].join("");
+        craF[n+"/public/index.html"]=[
+          "<!DOCTYPE html><html><head>",
+          "<meta charset='UTF-8'/><title>"+n+"</title>",
+          "</head><body><div id='root'></div></body></html>",
+        ].join("");
+        craF[n+"/package.json"]=[
+          '{\n  "name": "'+n+'",\n  "version": "0.1.0",',
+          '\n  "dependencies": { "'+RCT+'": "^18.2.0" }',
+          '\n}',
+        ].join("");
+        const fId=uid();
+        const sId=uid();
+        const pId=uid();
+        setTree(t=>{
+          const addN=(ns,pid,nn)=>ns.map(n=>n.id===pid?{...n,children:[...(n.children||[]),nn]}:n.children?{...n,children:addN(n.children,pid,nn)}:n);
+          let t2=addN(t,"root",{id:fId,name:n,type:"F",open:true,children:[]});
+          t2=addN(t2,fId,{id:sId,name:"src",type:"F",open:true,children:[]});
+          t2=addN(t2,fId,{id:pId,name:"public",type:"F",open:false,children:[]});
+          return t2;
+        });
+        Object.entries(craF).forEach(([fp,fc])=>{
+          const fid=uid();
+          const fname=fp.split("/").pop();
+          const pid2=fp.includes("/src/")?sId:fp.includes("/public/")?pId:fId;
+          setFiles(f=>({...f,[fp]:fc}));
+          setFmap(m=>({...m,[fid]:fp}));
+          setTree(t=>{
+            const addN=(ns,pid,nn)=>ns.map(nd=>nd.id===pid?{...nd,children:[...(nd.children||[]),nn]}:nd.children?{...nd,children:addN(nd.children,pid,nn)}:nd);
+            return addN(t,pid2,{id:fid,name:fname,type:"f"});
+          });
+        });
+        openFile(n+"/src/App.js");
+        setPanel("files");setSbOpen(true);
+        continue;
+      }
+      setTLines(l=>[...l,line]);
+      await sleep(10);
+    }
+    setTRun(false);
+  };
   const termRun=async(cmd)=>{setTO(true);setTLines(l=>[...l,{t:"dim",v:`$ ${cmd}`}]);setTRun(true);for await(const line of runCmd(cmd)){setTLines(l=>[...l,line]);await sleep(10);}setTRun(false);};
 
   const doAct=useCallback((act)=>{
     if(["files","search","git","extensions","ai","settings"].includes(act)){setPanel(act);setSbOpen(true);return;}
     if(act==="open-file")   {fileInputRef.current?.click();return;}
-    if(act==="open-folder") {folderInputRef.current?.click();return;}
+    if(act==="open-folder") {openFolderPicker();return;}
+    if(act==="paste-code")  {setShowPaste("paste");return;}
     if(act==="open-recent") {setPanel("files");setSbOpen(true);note("Recent: use Explorer to browse files","info");return;}
     if(act==="terminal")    {setTO(o=>!o);return;}
     if(act==="split")       {setSplit(s=>!s);return;}
@@ -758,7 +1022,7 @@ export default function App(){
       if((e.metaKey||e.ctrlKey)&&e.key==="s"){e.preventDefault();save(active);}
       if((e.metaKey||e.ctrlKey)&&e.key==="j"){e.preventDefault();setTO(o=>!o);}
       if((e.metaKey||e.ctrlKey)&&e.key==="n"){e.preventDefault();setNI({parentId:"src",type:"f"});}
-      if((e.metaKey||e.ctrlKey)&&e.key==="o"){e.preventDefault();if(e.shiftKey)folderInputRef.current?.click();else fileInputRef.current?.click();}
+      if((e.metaKey||e.ctrlKey)&&e.key==="o"){e.preventDefault();if(e.shiftKey)openFolderPicker();else fileInputRef.current?.click();}
       if((e.metaKey||e.ctrlKey)&&e.key==="w"){e.preventDefault();closeTab(active);}
       if((e.metaKey||e.ctrlKey)&&e.key==="="){e.preventDefault();setZoom(z=>Math.min(2,+(z+.1).toFixed(1)));}
       if((e.metaKey||e.ctrlKey)&&e.key==="-"){e.preventDefault();setZoom(z=>Math.max(.5,+(z-.1).toFixed(1)));}
@@ -839,13 +1103,25 @@ export default function App(){
 
             {/* Open File / Open Folder quick buttons inside Explorer */}
             {panel==="files"&&(
-              <div style={{padding:"8px 10px",borderBottom:`1px solid ${D.bdr}`,display:"flex",gap:6}}>
-                <button onClick={()=>doAct("open-file")} style={{flex:1,background:D.ac,border:"none",borderRadius:7,padding:"9px 6px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
-                  📂 Open File
-                </button>
-                <button onClick={()=>doAct("open-folder")} style={{flex:1,background:`${D.ac}22`,border:`1px solid ${D.ac}55`,borderRadius:7,padding:"9px 6px",color:D.ac,fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
-                  🗂️ Open Folder
-                </button>
+              <div style={{padding:"8px 10px",borderBottom:`1px solid ${D.bdr}`,display:"flex",flexDirection:"column",gap:6}}>
+                {/* Row 1 */}
+                <div style={{display:"flex",gap:6}}>
+                  <button onClick={()=>doAct("open-file")} style={{flex:1,background:D.ac,border:"none",borderRadius:7,padding:"10px 6px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                    📂 Open File
+                  </button>
+                  <button onClick={()=>openFolderPicker()} style={{flex:1,background:`${D.ac}22`,border:`2px solid ${D.ac}`,borderRadius:7,padding:"10px 6px",color:D.ac,fontSize:12,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                    🗂️ Open Folder
+                  </button>
+                </div>
+                {/* Row 2 — mobile-friendly extras */}
+                <div style={{display:"flex",gap:6}}>
+                  <button onClick={()=>fileInputRef.current&&(fileInputRef.current.multiple=true,fileInputRef.current.click())} style={{flex:1,background:`${D.grn}22`,border:`1px solid ${D.grn}55`,borderRadius:7,padding:"8px 6px",color:D.grn,fontSize:11,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                    📄+ Multi Files
+                  </button>
+                  <button onClick={()=>setShowPaste("paste")} style={{flex:1,background:`${D.pur}22`,border:`1px solid ${D.pur}55`,borderRadius:7,padding:"8px 6px",color:D.pur,fontSize:11,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:4}}>
+                    📋 Paste Code
+                  </button>
+                </div>
               </div>
             )}
 
@@ -921,13 +1197,21 @@ export default function App(){
                         <span style={{marginLeft:"auto",opacity:.6,fontSize:12}}>⌘O</span>
                       </button>
 
-                      <button onClick={()=>doAct("open-folder")} style={{width:"100%",background:D.sb,border:`2px solid ${D.ac}`,borderRadius:12,padding:"16px 20px",color:D.ac,fontSize:15,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:12,textAlign:"left"}}>
+                      <button onClick={()=>openFolderPicker()} style={{width:"100%",background:D.sb,border:`2px solid ${D.ac}`,borderRadius:12,padding:"16px 20px",color:D.ac,fontSize:15,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:12,textAlign:"left"}}>
                         <span style={{fontSize:24}}>🗂️</span>
                         <div>
                           <div>Open Folder</div>
-                          <div style={{fontSize:11,opacity:.7,fontWeight:400}}>Open entire project folder</div>
+                          <div style={{fontSize:11,opacity:.7,fontWeight:400}}>Open entire project folder from device</div>
                         </div>
                         <span style={{marginLeft:"auto",opacity:.6,fontSize:12}}>⌘⇧O</span>
+                      </button>
+
+                      <button onClick={()=>setShowPaste("paste")} style={{width:"100%",background:`${D.pur}22`,border:`2px solid ${D.pur}55`,borderRadius:12,padding:"16px 20px",color:D.pur,fontSize:15,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:12,textAlign:"left"}}>
+                        <span style={{fontSize:24}}>📋</span>
+                        <div>
+                          <div>Paste Code</div>
+                          <div style={{fontSize:11,opacity:.7,fontWeight:400}}>Paste code directly into editor</div>
+                        </div>
                       </button>
 
                       <button onClick={()=>doAct("new-file")} style={{width:"100%",background:`${D.grn}22`,border:`2px solid ${D.grn}55`,borderRadius:12,padding:"16px 20px",color:D.grn,fontSize:15,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",gap:12,textAlign:"left"}}>
@@ -1028,6 +1312,120 @@ export default function App(){
       {ctx&&<CtxMenu x={ctx.x} y={ctx.y} items={ctx.items} onClose={()=>setCtx(null)}/>}
       {showCmd&&<CmdPalette onClose={()=>setShowCmd(false)} onCmd={id=>{doAct(id);}}/>}
       {showDep&&<DeployModal onClose={()=>setShowDep(false)}/>}
+
+      {/* ══ PASTE CODE MODAL ══ */}
+      {showPaste==="paste"&&(
+        <div style={{position:"fixed",inset:0,background:"#000a",zIndex:950,display:"flex",alignItems:"flex-end",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>e.target===e.currentTarget&&setShowPaste(false)}>
+          <div style={{width:"100%",maxWidth:520,background:D.sb,borderRadius:"16px 16px 0 0",border:`1px solid ${D.bdr}`,padding:0,maxHeight:"85vh",display:"flex",flexDirection:"column"}}>
+            <div style={{padding:"16px",borderBottom:`1px solid ${D.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+              <span style={{fontSize:15,fontWeight:700,color:D.txt}}>📋 Paste Code</span>
+              <button onClick={()=>setShowPaste(false)} style={{background:"none",border:"none",color:D.dim,cursor:"pointer",fontSize:22}}>✕</button>
+            </div>
+            <div style={{padding:"14px 16px",borderBottom:`1px solid ${D.bdr}`,flexShrink:0}}>
+              <div style={{fontSize:12,color:D.dim,marginBottom:8}}>File name (e.g. App.tsx, index.js)</div>
+              <input
+                value={pasteModal.name}
+                onChange={e=>setPasteModal(p=>({...p,name:e.target.value}))}
+                placeholder="filename.js"
+                style={{width:"100%",background:D.inp,border:`1px solid ${D.bdr}`,borderRadius:8,padding:"10px 12px",color:D.txt,fontSize:14,outline:"none",boxSizing:"border-box"}}/>
+            </div>
+            <div style={{padding:"14px 16px",flex:1,display:"flex",flexDirection:"column",gap:8,overflow:"hidden"}}>
+              <div style={{fontSize:12,color:D.dim}}>Paste your code below:</div>
+              <textarea
+                value={pasteModal.code}
+                onChange={e=>setPasteModal(p=>({...p,code:e.target.value}))}
+                placeholder="Paste your code here..."
+                style={{flex:1,background:D.bg,border:`1px solid ${D.bdr}`,borderRadius:8,padding:"10px 12px",color:D.txt,fontSize:13,outline:"none",resize:"none",fontFamily:"'JetBrains Mono',monospace",lineHeight:1.6,minHeight:180,WebkitOverflowScrolling:"touch"}}/>
+            </div>
+            <div style={{padding:"14px 16px",borderTop:`1px solid ${D.bdr}`,display:"flex",gap:10,flexShrink:0}}>
+              <button onClick={()=>setShowPaste(false)} style={{flex:1,background:D.hov,border:`1px solid ${D.bdr}`,borderRadius:8,padding:"12px",color:D.dim,cursor:"pointer",fontSize:13}}>Cancel</button>
+              <button onClick={()=>{
+                const name=pasteModal.name.trim()||"untitled.txt";
+                const code=pasteModal.code;
+                if(!code.trim()){note("Please paste some code first","error");return;}
+                const id=uid();
+                const fp=name;
+                setFiles(f=>({...f,[fp]:code}));
+                setFmap(m=>({...m,[id]:fp}));
+                setTree(t=>{const tog=ns=>ns.map(n=>n.id==="root"?{...n,children:[...(n.children||[]),{id,name,type:"f"}]}:n.children?{...n,children:tog(n.children)}:n);return tog(t);});
+                openFile(fp);
+                setPasteModal({name:"",code:""});
+                setShowPaste(false);
+                note(`Created ${name} ✓`,"success");
+              }} style={{flex:2,background:D.ac,border:"none",borderRadius:8,padding:"12px",color:"#fff",fontWeight:700,cursor:"pointer",fontSize:13}}>
+                ✅ Open in Editor
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ FOLDER HELP MODAL (mobile) ══ */}
+      {showPaste==="folder-help"&&(
+        <div style={{position:"fixed",inset:0,background:"#000a",zIndex:950,display:"flex",alignItems:"flex-end",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>e.target===e.currentTarget&&setShowPaste(false)}>
+          <div style={{width:"100%",maxWidth:520,background:D.sb,borderRadius:"16px 16px 0 0",border:`1px solid ${D.bdr}`,padding:0,maxHeight:"85vh",overflow:"auto"}}>
+            <div style={{padding:"16px",borderBottom:`1px solid ${D.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:15,fontWeight:700,color:D.txt}}>🗂️ Open Folder</span>
+              <button onClick={()=>setShowPaste(false)} style={{background:"none",border:"none",color:D.dim,cursor:"pointer",fontSize:22}}>✕</button>
+            </div>
+
+            {/* Explanation */}
+            <div style={{padding:"14px 16px",background:`${D.yel}11`,borderBottom:`1px solid ${D.bdr}`}}>
+              <div style={{fontSize:13,color:D.yel,fontWeight:600,marginBottom:6}}>⚠️ Mobile Browser Limitation</div>
+              <div style={{fontSize:13,color:D.txt,lineHeight:1.7}}>
+                Mobile browsers (iOS Safari, Android Chrome) <strong>don't support folder selection</strong> — this is a browser restriction, not a bug.<br/><br/>
+                Use one of these options instead:
+              </div>
+            </div>
+
+            {/* Options */}
+            <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:12}}>
+
+              {/* Option 1 */}
+              <button onClick={()=>{setShowPaste(false);fileInputRef.current&&(fileInputRef.current.removeAttribute("multiple")||true)&&fileInputRef.current.click();}} style={{background:D.ac,border:"none",borderRadius:12,padding:"14px 16px",color:"#fff",cursor:"pointer",textAlign:"left",display:"flex",gap:14,alignItems:"flex-start"}}>
+                <span style={{fontSize:26,flexShrink:0}}>📂</span>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,marginBottom:3}}>Open Single File</div>
+                  <div style={{fontSize:12,opacity:.8}}>Pick one file at a time from your device storage</div>
+                </div>
+              </button>
+
+              {/* Option 2 — multiple files */}
+              <button onClick={()=>{
+                setShowPaste(false);
+                if(fileInputRef.current){
+                  fileInputRef.current.setAttribute("multiple","");
+                  fileInputRef.current.click();
+                }
+              }} style={{background:`${D.grn}22`,border:`2px solid ${D.grn}55`,borderRadius:12,padding:"14px 16px",color:D.grn,cursor:"pointer",textAlign:"left",display:"flex",gap:14,alignItems:"flex-start"}}>
+                <span style={{fontSize:26,flexShrink:0}}>📄+</span>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,marginBottom:3}}>Select Multiple Files</div>
+                  <div style={{fontSize:12,opacity:.8}}>Hold to select many files at once — best mobile option</div>
+                </div>
+              </button>
+
+              {/* Option 3 — paste */}
+              <button onClick={()=>setShowPaste("paste")} style={{background:`${D.pur}22`,border:`2px solid ${D.pur}55`,borderRadius:12,padding:"14px 16px",color:D.pur,cursor:"pointer",textAlign:"left",display:"flex",gap:14,alignItems:"flex-start"}}>
+                <span style={{fontSize:26,flexShrink:0}}>📋</span>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,marginBottom:3}}>Paste Code</div>
+                  <div style={{fontSize:12,opacity:.8}}>Copy code from any app and paste it directly</div>
+                </div>
+              </button>
+
+              {/* Option 4 — Desktop */}
+              <div style={{background:D.hov,borderRadius:12,padding:"14px 16px",border:`1px solid ${D.bdr}`}}>
+                <div style={{fontSize:13,color:D.dim,fontWeight:600,marginBottom:4}}>💡 For full folder support:</div>
+                <div style={{fontSize:13,color:D.txt,lineHeight:1.7}}>
+                  Open CodeForge on a <strong>desktop browser</strong> (Chrome/Edge) — folder selection works there.<br/>
+                  Or deploy your code to Vercel/Netlify.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
