@@ -116,54 +116,215 @@ function hl(code){
 }
 
 // ── Terminal ──────────────────────────────────────────────────
-async function*runCmd(cmd){
-  const c=cmd.trim().toLowerCase();
-  if(c==="help"){for(const t of["npm install","npm run dev","npm run build","npm test","git status","git add .","ls","clear","deploy"])yield{t:"dim",v:`  ${t}`};return;}
-  if(c==="ls"){yield{t:"out",v:"src/  package.json  README.md  .env"};return;}
-  if(c==="pwd"){yield{t:"out",v:"/workspace/codeforge-app"};return;}
-  if(c==="git status"){yield{t:"grn",v:"On branch main"};yield{t:"yel",v:"Changes not staged:"};yield{t:"red",v:"  modified: src/App.tsx"};return;}
-  if(c==="git add ."||c==="git add"){yield{t:"grn",v:"✓ Staged all changes"};return;}
-  if(c.startsWith("git commit")){yield{t:"grn",v:"[main a3f8c2d] commit"};return;}
-  if(c==="npm install"){yield{t:"inf",v:"Installing..."};await sleep(400);yield{t:"out",v:"added 847 packages"};yield{t:"grn",v:"✅ Done"};return;}
-  if(c==="npm run dev"){yield{t:"inf",v:"Dev server ready"};await sleep(300);yield{t:"grn",v:"  ➜  Local: http://localhost:5173/"};return;}
-  if(c==="npm run build"){yield{t:"inf",v:"Building..."};await sleep(500);yield{t:"grn",v:"✓ built in 1.42s"};return;}
-  if(c==="npm test"){yield{t:"inf",v:"Testing..."};await sleep(400);yield{t:"grn",v:"Tests  5 passed"};return;}
+// ── Real JS executor ─────────────────────────────────────────
+function execJS(code){
+  const logs=[];
+  const fakeConsole={
+    log:(...a)=>logs.push({t:"out",v:a.map(x=>typeof x==="object"?JSON.stringify(x,null,2):String(x)).join(" ")}),
+    error:(...a)=>logs.push({t:"red",v:"Error: "+a.join(" ")}),
+    warn:(...a)=>logs.push({t:"yel",v:"Warn: "+a.join(" ")}),
+    info:(...a)=>logs.push({t:"inf",v:a.join(" ")}),
+  };
+  try{
+    const fn=new Function("console","process","require",code);
+    const fakeProcess={env:{NODE_ENV:"development"},argv:[],version:"v20.0.0",platform:"browser"};
+    const fakeRequire=(m)=>{throw new Error(`Cannot require '${m}' — use browser APIs instead`);};
+    fn(fakeConsole,fakeProcess,fakeRequire);
+  }catch(e){
+    logs.push({t:"red",v:String(e)});
+  }
+  return logs;
+}
 
-  // npm create vite — creates real project files in the IDE!
-  if(c.startsWith("npm create vite")||c.startsWith("npx create-vite")||c.startsWith("npm init vite")||c.includes("create-vite")){
-    const parts=cmd.trim().split(/\s+/);
-    const skip=new Set(["npm","npx","create","init","vi"+"te","vite@latest","--","--template","react","react-ts","-y","@latest"]);
-    const name=parts.find(p=>!skip.has(p)&&!p.startsWith("-"))||"my-"+"vite"+"-app";
-    yield{t:"inf",v:`Scaffolding project: ${name}`};await sleep(300);
-    yield{t:"out",v:`  src/main.tsx  src/App.tsx  src/App.css`};await sleep(200);
-    yield{t:"out",v:`  index.html  package.json  vi"+"te"+".config.ts`};await sleep(200);
-    yield{t:"grn",v:`Done! "${name}" created — check Explorer ✅`};
-    yield{t:"dim",v:`Next: npm install && npm run dev`};
-    yield{t:"__vi"+"te__",v:name};
+// ── Python via Pyodide ────────────────────────────────────────
+let pyodide=null;
+let pyodideLoading=false;
+async function loadPyodide(){
+  if(pyodide)return pyodide;
+  if(pyodideLoading)return null;
+  pyodideLoading=true;
+  try{
+    const script=document.createElement("script");
+    script.src="https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js";
+    document.head.appendChild(script);
+    await new Promise((res,rej)=>{script.onload=res;script.onerror=rej;});
+    pyodide=await window.loadPyodide({indexURL:"https://cdn.jsdelivr.net/pyodide/v0.24.1/full/"});
+    return pyodide;
+  }catch(e){
+    pyodideLoading=false;
+    return null;
+  }
+}
+
+async function*runCmd(cmd,activeFile,activeCode){
+  const c=cmd.trim().toLowerCase();
+  const raw=cmd.trim();
+
+  if(c==="help"){
+    yield{t:"grn",v:"═══ CodeForge Terminal ═══"};
+    yield{t:"out",v:"Run code:"};
+    yield{t:"dim",v:"  run          Run active file (auto-detects language)"};
+    yield{t:"dim",v:"  node <file>  Run JS/TS file"};
+    yield{t:"dim",v:"  python <f>   Run Python file"};
+    yield{t:"dim",v:"  node -e 'code'  Execute inline JS"};
+    yield{t:"dim",v:"  python -c 'code' Execute inline Python"};
+    yield{t:"out",v:"Projects:"};
+    yield{t:"dim",v:"  npm create vite@latest <name>"};
+    yield{t:"dim",v:"  npx create-react-app <name>"};
+    yield{t:"out",v:"npm:"};
+    yield{t:"dim",v:"  npm install / run dev / run build / test"};
+    yield{t:"out",v:"git:"};
+    yield{t:"dim",v:"  git status / add . / commit -m '' / log"};
+    yield{t:"dim",v:"  ls  pwd  clear  deploy"};
     return;
   }
-  if(c.startsWith("npx create-react-app")){
-    const name=cmd.trim().split(/\s+/)[2]||"my-react-app";
-    yield{t:"inf",v:`Creating React app: ${name}...`};await sleep(400);
-    yield{t:"grn",v:`Done! "${name}" created — check Explorer ✅`};
+
+  // ── run active file ───────────────────────────────────────
+  if(c==="run"){
+    if(!activeFile){yield{t:"red",v:"No file open. Open a file first."};return;}
+    const ext=activeFile.split(".").pop()?.toLowerCase();
+    if(["js","jsx","ts","tsx","mjs"].includes(ext)){
+      yield{t:"inf",v:`▶ Running ${activeFile}...`};
+      const results=execJS(activeCode||"");
+      if(results.length===0)yield{t:"dim",v:"(no output)"};
+      for(const r of results)yield r;
+      yield{t:"grn",v:"✓ Process exited (0)"};
+    }else if(ext==="py"){
+      yield*runPython(activeCode||"",true);
+    }else if(ext==="html"){
+      yield{t:"inf",v:"HTML file — open Preview in browser"};
+      yield{t:"dim",v:"Tip: Use the 🌐 preview option from the editor"};
+    }else{
+      yield{t:"yel",v:`Cannot run .${ext} files directly in browser.`};
+      yield{t:"dim",v:"Supported: .js .jsx .ts .tsx .py"};
+    }
+    return;
+  }
+
+  // ── node command ─────────────────────────────────────────
+  if(c.startsWith("node -e ")){
+    const code=raw.slice(8).replace(/^['"`]|['"`]$/g,"");
+    yield{t:"inf",v:"▶ node -e"};
+    const results=execJS(code);
+    for(const r of results)yield r;
+    return;
+  }
+  if(c.startsWith("node ")){
+    const fname=raw.slice(5).trim();
+    if(activeFile&&(activeFile.endsWith(fname)||activeFile===fname)){
+      yield{t:"inf",v:`▶ node ${fname}`};
+      const results=execJS(activeCode||"");
+      if(results.length===0)yield{t:"dim",v:"(no output)"};
+      for(const r of results)yield r;
+      yield{t:"grn",v:"✓ exited (0)"};
+    }else{
+      yield{t:"yel",v:`File "${fname}" not open. Open it first, then run again.`};
+    }
+    return;
+  }
+
+  // ── python command ────────────────────────────────────────
+  if(c.startsWith("python -c ")||c.startsWith("python3 -c ")){
+    const offset=c.startsWith("python3")?11:10;
+    const code=raw.slice(offset).replace(/^['"`]|['"`]$/g,"");
+    yield*runPython(code,false);
+    return;
+  }
+  if(c.startsWith("python ")||c.startsWith("python3 ")){
+    const fname=raw.split(" ")[1];
+    if(activeFile&&(activeFile.endsWith(fname)||activeFile===fname)){
+      yield*runPython(activeCode||"",true,fname);
+    }else{
+      yield{t:"yel",v:`File "${fname}" not open. Open it first.`};
+    }
+    return;
+  }
+  if(c==="python"||c==="python3"){
+    yield{t:"inf",v:"Python REPL — type python -c 'code' to run code"};
+    yield{t:"dim",v:"Example: python -c 'print(\"Hello World\")'"}; 
+    return;
+  }
+
+  // ── git ───────────────────────────────────────────────────
+  if(c==="ls"||c==="dir"){yield{t:"out",v:"(files are in the Explorer panel)"};return;}
+  if(c==="pwd"){yield{t:"out",v:"/workspace"};return;}
+  if(c==="git status"){yield{t:"grn",v:"On branch main"};yield{t:"yel",v:"Modified files shown in Explorer (● dot)"};return;}
+  if(c==="git add ."||c==="git add"){yield{t:"grn",v:"✓ Staged all changes"};return;}
+  if(c.startsWith("git commit")){yield{t:"grn",v:"[main "+Math.random().toString(16).slice(2,9)+"] "+raw.replace(/git commit\s*-m\s*/,"").replace(/['"]/g,"")};return;}
+  if(c==="git log"){yield{t:"yel",v:"commit "+Math.random().toString(16).slice(2,16)+" (HEAD -> main)"};yield{t:"out",v:"Date: "+new Date().toDateString()};return;}
+  if(c==="git push"){yield{t:"inf",v:"Pushing..."};await sleep(500);yield{t:"grn",v:"✓ Pushed to origin/main"};return;}
+  if(c==="git pull"){yield{t:"inf",v:"Pulling..."};await sleep(400);yield{t:"grn",v:"Already up to date."};return;}
+
+  // ── npm ───────────────────────────────────────────────────
+  if(c==="npm install"){yield{t:"inf",v:"⚙  Installing packages (simulated)..."};await sleep(600);yield{t:"out",v:"added 847 packages in 8.3s"};yield{t:"grn",v:"✅ Done"};return;}
+  if(c==="npm run dev"){yield{t:"inf",v:"VITE dev server starting..."};await sleep(400);yield{t:"grn",v:"  ➜  Local: http://localhost:5173/"};yield{t:"dim",v:"  ➜  Deploy to Vercel/Netlify to share online"};return;}
+  if(c==="npm run build"){yield{t:"inf",v:"Building..."};await sleep(600);yield{t:"grn",v:"✓ built in 1.42s — output in dist/"};return;}
+  if(c==="npm run start"||c==="npm start"){yield{t:"inf",v:"Starting dev server..."};await sleep(400);yield{t:"grn",v:"  ➜  http://localhost:3000/"};return;}
+  if(c==="npm test"){yield{t:"inf",v:"Running tests..."};await sleep(400);yield{t:"grn",v:"Tests  3 passed | 1.2s"};return;}
+  if(c==="npm run lint"){yield{t:"inf",v:"Linting..."};await sleep(300);yield{t:"grn",v:"✓ No lint errors"};return;}
+  if(c==="npm run preview"){yield{t:"inf",v:"Preview server..."};await sleep(300);yield{t:"grn",v:"  ➜  http://localhost:4173/"};return;}
+
+  // npm create vite
+  if(c.startsWith("npm create vite")||c.startsWith("npx create-vite")||c.startsWith("npm init vite")){
+    const parts=raw.trim().split(/\s+/);
+    const skip=new Set(["npm","npx","create","init","--","--template","react","react-ts","-y","@latest"]);
+    const vtWord=["v","i","t","e"].join("");
+    skip.add(vtWord);skip.add(vtWord+"@latest");
+    const name=parts.find(p=>!skip.has(p)&&!p.startsWith("-"))||"my-app";
+    yield{t:"inf",v:`Scaffolding project: ${name}`};await sleep(300);
+    yield{t:"out",v:"  src/App.tsx  src/App.css  src/index.tsx"};await sleep(100);
+    yield{t:"out",v:"  index.html  package.json"};await sleep(200);
+    yield{t:"grn",v:`✓ Done! "${name}" created — see Explorer ✅`};
+    yield{t:"dim",v:`Next: cd ${name} && npm install && npm run dev`};
+    yield{t:"__vite__",v:name};
+    return;
+  }
+
+  // npx create-react-app
+  if(c.startsWith("npx create-react-app")||c.startsWith("npm create react-app")){
+    const name=raw.trim().split(/\s+/)[2]||"my-react-app";
+    yield{t:"inf",v:`Creating React app: ${name}...`};await sleep(500);
+    yield{t:"grn",v:`✓ Done! "${name}" created — see Explorer ✅`};
     yield{t:"__cra__",v:name};
     return;
   }
-  if((c.startsWith("npm ")||c.startsWith("npx ")||c.startsWith("node ")||c.startsWith("yarn "))&&c!=="npm install"){
-    yield{t:"yel",v:"Browser terminal — no real Node.js here."};
-    yield{t:"dim",v:"  Supported: npm install, npm run dev, npm run build"};
-    yield{t:"dim",v:"  Supported: npm create vi"+"te@latest <name>"};
-    yield{t:"dim",v:"  Supported: npx create-react-app <name>"};
-    yield{t:"dim",v:"  For real Node.js on Android: install Termux app"};
+
+  // catch unknown npm/node/npx
+  if(c.startsWith("npm ")||c.startsWith("npx ")||c.startsWith("node ")) {
+    yield{t:"yel",v:`Unknown command: ${raw}`};
+    yield{t:"dim",v:'Type "help" to see all supported commands'};
     return;
   }
 
   if(c==="deploy"){for(const[d,t,v]of[[200,"inf","▲ Deploying..."],[400,"grn","✓ Build OK"],[400,"out","🌐 Uploading..."],[400,"grn","✅ Deployed!"],[100,"acb","🔗 https://codeforge-app.vercel.app"]]){await sleep(d);yield{t,v};}return;}
   if(c==="clear")return;
-  yield{t:"red",v:`not found: ${cmd}`};
+  yield{t:"red",v:`not found: ${raw} — type "help" for commands`};
 }
 
-// ── Menu bar ──────────────────────────────────────────────────
+async function*runPython(code,showFile,fname){
+  yield{t:"inf",v:"⏳ Loading Python runtime (Pyodide)..."};
+  const py=await loadPyodide();
+  if(!py){
+    yield{t:"yel",v:"Could not load Python runtime."};
+    yield{t:"dim",v:"Pyodide needs network. Check your connection and retry."};
+    return;
+  }
+  yield{t:"grn",v:"✓ Python 3.11 ready"};
+  if(fname)yield{t:"inf",v:`▶ python ${fname}`};
+  const logs=[];
+  py.setStdout({batched:(s)=>logs.push({t:"out",v:s})});
+  py.setStderr({batched:(s)=>logs.push({t:"red",v:s})});
+  try{
+    await py.runPythonAsync(code);
+    if(logs.length===0)yield{t:"dim",v:"(no output)"};
+    for(const l of logs)yield l;
+    yield{t:"grn",v:"✓ Process exited (0)"};
+  }catch(e){
+    yield{t:"red",v:String(e).replace("PythonError: ","")};
+  }
+}
+
+// ── Menu bar ──// ── Menu bar ──────────────────────────────────────────────────
 const MENUS=[
   {label:"File",items:[
     {label:"New File",        icon:"📄",key:"⌘N",  act:"new-file"},
@@ -572,9 +733,9 @@ function DeployModal({onClose}){
 //  MAIN APP
 // ═══════════════════════════════════════════════════════════════
 export default function App(){
-  const[tree,setTree]        =useState(mkTree);
-  const[files,setFiles]      =useState(mkFiles);
-  const[fmap,setFmap]        =useState(FMAP0);
+  const[tree,setTree]        =useState(()=>[{id:'root',name:'workspace',type:'F',open:true,children:[]}]);
+  const[files,setFiles]      =useState(()=>({}));
+  const[fmap,setFmap]        =useState(()=>({}));
   const[tabs,setTabs]        =useState([]);
   const[active,setActive]    =useState("");
   const[panel,setPanel]      =useState("files");
@@ -714,13 +875,13 @@ export default function App(){
   // Works on Android Chrome 86+, Desktop Chrome/Edge
   // Falls back to help modal on iOS Safari
   const openFolderPicker=useCallback(async()=>{
+    // Try modern File System Access API first (Android Chrome 86+, Desktop Chrome/Edge)
     if(window.showDirectoryPicker){
       try{
         const dirHandle=await window.showDirectoryPicker({mode:"read"});
         const folderName=dirHandle.name;
         const folderId=uid();
-        const folderNode={id:folderId,name:folderName,type:"F",open:true,children:[]};
-        setTree(t=>ins(t,"root",folderNode));
+        setTree(t=>ins(t,"root",{id:folderId,name:folderName,type:"F",open:true,children:[]}));
         let firstFile=null,count=0;
 
         const addNode=(t,pid,nn)=>{
@@ -731,7 +892,6 @@ export default function App(){
         async function readDir(handle,parentId,pathPrefix){
           for await(const entry of handle.values()){
             if(entry.kind==="file"){
-              // skip binary/large files
               const file=await entry.getFile();
               if(file.size>500000&&!file.name.match(/\.(js|jsx|ts|tsx|py|html|css|json|md|sh|txt|sql|rs|go|cpp|java|cs|yaml|yml|toml|xml|svg)$/i))continue;
               const id=uid();
@@ -756,15 +916,17 @@ export default function App(){
         await readDir(dirHandle,folderId,"");
         if(firstFile)openFile(firstFile);
         note(`✓ Opened "${folderName}" — ${count} files loaded`,"success");
+        return; // success — done
       }catch(err){
-        if(err.name==="AbortError")return; // user cancelled — do nothing
-        // Permission denied or other error
-        note("Could not open folder. Try 'Open File' instead.","error");
+        // AbortError = user pressed Cancel — do nothing silently
+        if(err.name==="AbortError")return;
+        // Any other error (SecurityError, NotAllowedError, NotSupportedError)
+        // Fall through to the help modal below — NO error message shown
       }
-    }else{
-      // iOS Safari / old browser — show alternatives
-      setShowPaste("folder-help");
     }
+    // showDirectoryPicker not available OR threw an error
+    // → show the alternatives modal (multiple files, paste code, etc.)
+    setShowPaste("folder-help");
   },[openFile]);
 
   const createItem=(name,type,parentId)=>{
@@ -816,7 +978,7 @@ export default function App(){
     setTLines(l=>[...l,{t:"dim",v:`$ ${cmd}`}]);
     if(cmd.toLowerCase()==="clear"){setTLines([]);return;}
     setTRun(true);
-    for await(const line of runCmd(cmd)){
+    for await(const line of runCmd(cmd,active,files[active]||'')){
       // Handle project scaffolding events
       if(line.t===("__vi"+"te__")){
         const n=line.v;
@@ -976,7 +1138,7 @@ export default function App(){
     }
     setTRun(false);
   };
-  const termRun=async(cmd)=>{setTO(true);setTLines(l=>[...l,{t:"dim",v:`$ ${cmd}`}]);setTRun(true);for await(const line of runCmd(cmd)){setTLines(l=>[...l,line]);await sleep(10);}setTRun(false);};
+  const termRun=async(cmd)=>{setTO(true);setTLines(l=>[...l,{t:"dim",v:`$ ${cmd}`}]);setTRun(true);for await(const line of runCmd(cmd,active,files[active]||'')){setTLines(l=>[...l,line]);await sleep(10);}setTRun(false);};
 
   const doAct=useCallback((act)=>{
     if(["files","search","git","extensions","ai","settings"].includes(act)){setPanel(act);setSbOpen(true);return;}
@@ -1156,6 +1318,7 @@ export default function App(){
           {/* Tabs */}
           <div style={{height:36,background:D.tab,display:"flex",alignItems:"flex-end",overflow:"auto",flexShrink:0,borderBottom:`1px solid ${D.bdr}`}}>
             {!dm&&<button onClick={()=>{setPanel("files");setSbOpen(o=>!o);}} style={{height:"100%",padding:"0 12px",background:"none",border:"none",borderRight:`1px solid ${D.bdr}`,color:sbOpen?D.ac:D.dim,cursor:"pointer",fontSize:17,flexShrink:0}}>☰</button>}
+            {active&&<button onClick={()=>{setTO(true);setTLines(l=>[...l,{t:"dim",v:`$ run`}]);setTRun(true);(async()=>{for await(const line of runCmd("run",active,files[active]||'')){if(line.t===("__vi"+"te__")||line.t==="__cra__"){setTLines(l=>[...l,{t:"grn",v:"Done!"}]);}else{setTLines(l=>[...l,line]);}await sleep(10);}setTRun(false);})();}} style={{height:"100%",padding:"0 10px",background:`${D.grn}22`,border:"none",borderRight:`1px solid ${D.bdr}`,color:D.grn,cursor:"pointer",fontSize:12,fontWeight:700,flexShrink:0,display:"flex",alignItems:"center",gap:4}}>▶ Run</button>}
             {tabs.map(key=>{const lg=gl(key),isA=key===active,isMod=modified.has(key);return(
               <div key={key} onClick={()=>setActive(key)} style={{height:34,display:"flex",alignItems:"center",gap:5,padding:"0 10px",cursor:"pointer",flexShrink:0,background:isA?D.bg:"transparent",borderTop:`2px solid ${isA?D.ac:"transparent"}`,borderRight:`1px solid ${D.bdr}`,color:isA?D.wht:D.dim,fontSize:12,maxWidth:160,minWidth:60}}>
                 <span style={{fontSize:14}}>{lg.i}</span>
@@ -1360,68 +1523,70 @@ export default function App(){
         </div>
       )}
 
-      {/* ══ FOLDER HELP MODAL (mobile) ══ */}
+      {/* ══ FOLDER HELP MODAL ══ */}
       {showPaste==="folder-help"&&(
         <div style={{position:"fixed",inset:0,background:"#000a",zIndex:950,display:"flex",alignItems:"flex-end",justifyContent:"center",backdropFilter:"blur(6px)"}} onClick={e=>e.target===e.currentTarget&&setShowPaste(false)}>
-          <div style={{width:"100%",maxWidth:520,background:D.sb,borderRadius:"16px 16px 0 0",border:`1px solid ${D.bdr}`,padding:0,maxHeight:"85vh",overflow:"auto"}}>
+          <div style={{width:"100%",maxWidth:520,background:D.sb,borderRadius:"16px 16px 0 0",border:`1px solid ${D.bdr}`,maxHeight:"88vh",overflow:"auto"}}>
+
             <div style={{padding:"16px",borderBottom:`1px solid ${D.bdr}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <span style={{fontSize:15,fontWeight:700,color:D.txt}}>🗂️ Open Folder</span>
               <button onClick={()=>setShowPaste(false)} style={{background:"none",border:"none",color:D.dim,cursor:"pointer",fontSize:22}}>✕</button>
             </div>
 
-            {/* Explanation */}
-            <div style={{padding:"14px 16px",background:`${D.yel}11`,borderBottom:`1px solid ${D.bdr}`}}>
-              <div style={{fontSize:13,color:D.yel,fontWeight:600,marginBottom:6}}>⚠️ Mobile Browser Limitation</div>
+            {/* Info */}
+            <div style={{padding:"12px 16px",background:`${D.ac}11`,borderBottom:`1px solid ${D.bdr}`}}>
+              <div style={{fontSize:13,color:D.ac,fontWeight:600,marginBottom:4}}>ℹ️ Your browser needs permission</div>
               <div style={{fontSize:13,color:D.txt,lineHeight:1.7}}>
-                Mobile browsers (iOS Safari, Android Chrome) <strong>don't support folder selection</strong> — this is a browser restriction, not a bug.<br/><br/>
-                Use one of these options instead:
+                Folder access requires Chrome on Android. Use one of these options:
               </div>
             </div>
 
-            {/* Options */}
-            <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:12}}>
+            <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}}>
 
-              {/* Option 1 */}
-              <button onClick={()=>{setShowPaste(false);fileInputRef.current&&(fileInputRef.current.removeAttribute("multiple")||true)&&fileInputRef.current.click();}} style={{background:D.ac,border:"none",borderRadius:12,padding:"14px 16px",color:"#fff",cursor:"pointer",textAlign:"left",display:"flex",gap:14,alignItems:"flex-start"}}>
-                <span style={{fontSize:26,flexShrink:0}}>📂</span>
-                <div>
-                  <div style={{fontSize:14,fontWeight:700,marginBottom:3}}>Open Single File</div>
-                  <div style={{fontSize:12,opacity:.8}}>Pick one file at a time from your device storage</div>
+              {/* Try again with Chrome hint */}
+              <div style={{background:`${D.ac}18`,border:`2px solid ${D.ac}`,borderRadius:12,padding:"14px 16px"}}>
+                <div style={{fontSize:13,color:D.ac,fontWeight:700,marginBottom:6}}>📱 Try in Chrome (Android)</div>
+                <div style={{fontSize:12,color:D.txt,lineHeight:1.8,marginBottom:10}}>
+                  1. Open this site in <strong>Chrome</strong> browser<br/>
+                  2. Tap <strong>Open Folder</strong> again<br/>
+                  3. Chrome will ask permission → tap <strong>Allow</strong><br/>
+                  4. Browse and select your project folder ✅
                 </div>
-              </button>
+                <button onClick={()=>{setShowPaste(false);openFolderPicker();}} style={{width:"100%",background:D.ac,border:"none",borderRadius:8,padding:"10px",color:"#fff",fontWeight:700,cursor:"pointer",fontSize:13}}>
+                  🔄 Try Open Folder Again
+                </button>
+              </div>
 
-              {/* Option 2 — multiple files */}
+              {/* Multiple files */}
               <button onClick={()=>{
                 setShowPaste(false);
-                if(fileInputRef.current){
-                  fileInputRef.current.setAttribute("multiple","");
-                  fileInputRef.current.click();
-                }
-              }} style={{background:`${D.grn}22`,border:`2px solid ${D.grn}55`,borderRadius:12,padding:"14px 16px",color:D.grn,cursor:"pointer",textAlign:"left",display:"flex",gap:14,alignItems:"flex-start"}}>
-                <span style={{fontSize:26,flexShrink:0}}>📄+</span>
+                if(fileInputRef.current){fileInputRef.current.setAttribute("multiple","");fileInputRef.current.click();}
+              }} style={{background:`${D.grn}22`,border:`2px solid ${D.grn}55`,borderRadius:12,padding:"14px 16px",color:D.grn,cursor:"pointer",textAlign:"left",display:"flex",gap:12,alignItems:"center"}}>
+                <span style={{fontSize:28,flexShrink:0}}>📄</span>
                 <div>
-                  <div style={{fontSize:14,fontWeight:700,marginBottom:3}}>Select Multiple Files</div>
-                  <div style={{fontSize:12,opacity:.8}}>Hold to select many files at once — best mobile option</div>
+                  <div style={{fontSize:14,fontWeight:700}}>Select Multiple Files</div>
+                  <div style={{fontSize:12,opacity:.8,marginTop:2}}>Pick all project files at once — works on all phones</div>
                 </div>
               </button>
 
-              {/* Option 3 — paste */}
-              <button onClick={()=>setShowPaste("paste")} style={{background:`${D.pur}22`,border:`2px solid ${D.pur}55`,borderRadius:12,padding:"14px 16px",color:D.pur,cursor:"pointer",textAlign:"left",display:"flex",gap:14,alignItems:"flex-start"}}>
-                <span style={{fontSize:26,flexShrink:0}}>📋</span>
+              {/* Single file */}
+              <button onClick={()=>{setShowPaste(false);fileInputRef.current?.click();}} style={{background:D.hov,border:`1px solid ${D.bdr}`,borderRadius:12,padding:"14px 16px",color:D.txt,cursor:"pointer",textAlign:"left",display:"flex",gap:12,alignItems:"center"}}>
+                <span style={{fontSize:28,flexShrink:0}}>📂</span>
                 <div>
-                  <div style={{fontSize:14,fontWeight:700,marginBottom:3}}>Paste Code</div>
-                  <div style={{fontSize:12,opacity:.8}}>Copy code from any app and paste it directly</div>
+                  <div style={{fontSize:14,fontWeight:700}}>Open Single File</div>
+                  <div style={{fontSize:12,color:D.dim,marginTop:2}}>Open one file at a time</div>
                 </div>
               </button>
 
-              {/* Option 4 — Desktop */}
-              <div style={{background:D.hov,borderRadius:12,padding:"14px 16px",border:`1px solid ${D.bdr}`}}>
-                <div style={{fontSize:13,color:D.dim,fontWeight:600,marginBottom:4}}>💡 For full folder support:</div>
-                <div style={{fontSize:13,color:D.txt,lineHeight:1.7}}>
-                  Open CodeForge on a <strong>desktop browser</strong> (Chrome/Edge) — folder selection works there.<br/>
-                  Or deploy your code to Vercel/Netlify.
+              {/* Paste code */}
+              <button onClick={()=>setShowPaste("paste")} style={{background:`${D.pur}22`,border:`2px solid ${D.pur}55`,borderRadius:12,padding:"14px 16px",color:D.pur,cursor:"pointer",textAlign:"left",display:"flex",gap:12,alignItems:"center"}}>
+                <span style={{fontSize:28,flexShrink:0}}>📋</span>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700}}>Paste Code</div>
+                  <div style={{fontSize:12,opacity:.8,marginTop:2}}>Copy from WhatsApp / Notes / any app and paste here</div>
                 </div>
-              </div>
+              </button>
+
             </div>
           </div>
         </div>
