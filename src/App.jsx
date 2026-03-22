@@ -535,16 +535,20 @@ function hl(code) {
   // function calls
   h = h.replace(/\b([a-zA-Z_]\w*)\s*(?=\()/g, (m) => mark(m, "#dcdcaa"));
   // restore slots
-  slots.forEach((s, i) => { h = h.replace("@@" + i + "@@", s); });
+  // Use split/join — avoids $& $1 etc being interpreted in replacement
+  slots.forEach((s, i) => { h = h.split("@@" + i + "@@").join(s); });
   return h;
 }
 
 // ── Tree helpers ─────────────────────────────────────────────
-const ins = (ns, pid, nn) => ns.map((n) => {
-  if (n.id === pid) return {...n, children:[...(n.children||[]),nn]};
-  if (n.children) return {...n, children:ins(n.children,pid,nn)};
-  return n;
-});
+const ins = (ns, pid, nn) => {
+  if (pid === "root") return [...ns, nn];
+  return ns.map((n) => {
+    if (n.id === pid) return {...n, children:[...(n.children||[]),nn]};
+    if (n.children) return {...n, children:ins(n.children,pid,nn)};
+    return n;
+  });
+};
 const rem = (ns, id) => ns.reduce((a,n) => {
   if (n.id === id) return a;
   a.push(n.children ? {...n,children:rem(n.children,id)} : n);
@@ -905,6 +909,42 @@ function Term({lines, onRun, input, setInput, running, cwd, onOpenBrowser}) {
   );
 }
 
+
+// ── Browser side panel with horizontal drag ───────────
+function BrowserPanel({url, width, onWidthChange, onClose, onFS}) {
+  const startDrag = useCallback((e) => {
+    e.preventDefault();
+    const startX = e.touches ? e.touches[0].clientX : e.clientX;
+    const startW = width;
+    const onMove = (ev) => {
+      const x = ev.touches ? ev.touches[0].clientX : ev.clientX;
+      const newW = Math.min(window.innerWidth * 0.85, Math.max(180, startW - (x - startX)));
+      onWidthChange(newW);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup",   onUp);
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend",  onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup",   onUp);
+    document.addEventListener("touchmove", onMove, {passive:false});
+    document.addEventListener("touchend",  onUp);
+  }, [width, onWidthChange]);
+
+  return (
+    <div style={{width, display:"flex", flexDirection:"row", flexShrink:0, overflow:"hidden"}}>
+      {/* Vertical drag handle on the LEFT edge */}
+      <div onMouseDown={startDrag} onTouchStart={startDrag}
+        style={{width:12, background:"#0d1117", cursor:"ew-resize", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, userSelect:"none", borderLeft:`2px solid #4fc3f7`}}>
+        <div style={{width:3, height:40, borderRadius:2, background:"#4fc3f755"}}/>
+      </div>
+      <RKBrowser url={url} onClose={onClose} height={undefined} onHeightChange={()=>{}} fullscreen={false} onToggleFS={onFS}/>
+    </div>
+  );
+}
+
 function RKBrowser({url:initUrl, onClose, height, onHeightChange, fullscreen, onToggleFS}) {
   const [url, setUrl]     = useState(initUrl || "https://www.google.com");
   const [input, setInput] = useState(initUrl || "");
@@ -975,19 +1015,13 @@ function RKBrowser({url:initUrl, onClose, height, onHeightChange, fullscreen, on
 
   const wrap = fullscreen
     ? {position:"fixed",inset:0,zIndex:900,display:"flex",flexDirection:"column",background:D.bg}
-    : {height,background:D.bg,display:"flex",flexDirection:"column",flexShrink:0,borderTop:"2px solid #4fc3f7",overflow:"hidden"};
+    : height
+      ? {height,background:D.bg,display:"flex",flexDirection:"column",flexShrink:0,borderTop:"2px solid #4fc3f7",overflow:"hidden"}
+      : {flex:1,background:D.bg,display:"flex",flexDirection:"column",overflow:"hidden"};
 
   return (
     <div style={wrap}>
-      {/* Drag handle */}
-      {!fullscreen && (
-        <div onMouseDown={startDrag} onTouchStart={startDrag}
-          style={{height:14,background:"#0d1117",cursor:"ns-resize",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,userSelect:"none",borderBottom:`1px solid ${D.bdr}`}}>
-          <div style={{width:40,height:4,borderRadius:2,background:"#4fc3f755"}}/>
-          <span style={{fontSize:10,color:"#4fc3f7",margin:"0 8px",fontWeight:700,letterSpacing:".1em"}}>DRAG TO RESIZE</span>
-          <div style={{width:40,height:4,borderRadius:2,background:"#4fc3f755"}}/>
-        </div>
-      )}
+      {/* Drag handle only shown for bottom-mode — side panel uses BrowserPanel's handle */}
       {/* Toolbar */}
       <div style={{height:44,background:"#0d0d1f",borderBottom:`1px solid ${D.bdr}`,display:"flex",alignItems:"center",gap:4,padding:"0 8px",flexShrink:0}}>
         <span style={{fontSize:16,marginRight:2}}>🌐</span>
@@ -1028,14 +1062,27 @@ function RKBrowser({url:initUrl, onClose, height, onHeightChange, fullscreen, on
               {" "}only exists on your local machine.
             </div>
             <div style={{background:"#111",border:`1px solid ${D.bdr}`,borderRadius:10,padding:"12px 16px",maxWidth:300,width:"100%"}}>
-              <div style={{color:D.grn,fontWeight:700,fontSize:13,marginBottom:8}}>✅ Solutions:</div>
-              <div style={{color:D.txt,fontSize:12,lineHeight:2}}>
-                1. Use <strong>ngrok:</strong> <code style={{color:D.ac}}>npx ngrok http 3000</code><br/>
-                2. Use <strong>localtunnel:</strong> <code style={{color:D.ac}}>npx localtunnel --port 3000</code><br/>
-                3. <strong>Deploy</strong> to Vercel/Netlify → works everywhere
+              <div style={{color:D.grn,fontWeight:700,fontSize:13,marginBottom:8}}>✅ Get a public URL — run in terminal:</div>
+              <div style={{marginBottom:8,background:"#111",borderRadius:6,padding:"8px 10px"}}>
+                <div style={{color:D.grn,fontSize:11,fontWeight:700,marginBottom:3}}>ngrok (easiest)</div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <code style={{color:D.ac,fontSize:11,flex:1}}>{"npx ngrok http "+(url.split(":").pop()||"3000")}</code>
+                  <button onClick={()=>navigator.clipboard?.writeText("npx ngrok http "+(url.split(":").pop()||"3000")).then(()=>alert("Copied! Paste in terminal"))} style={{background:D.ac,border:"none",borderRadius:4,padding:"3px 8px",color:"#fff",cursor:"pointer",fontSize:10,flexShrink:0}}>Copy</button>
+                </div>
               </div>
+              <div style={{background:"#111",borderRadius:6,padding:"8px 10px"}}>
+                <div style={{color:D.grn,fontSize:11,fontWeight:700,marginBottom:3}}>localtunnel (free, no account)</div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <code style={{color:D.ac,fontSize:11,flex:1}}>{"npx localtunnel --port "+(url.split(":").pop()||"3000")}</code>
+                  <button onClick={()=>navigator.clipboard?.writeText("npx localtunnel --port "+(url.split(":").pop()||"3000")).then(()=>alert("Copied! Paste in terminal"))} style={{background:D.ac,border:"none",borderRadius:4,padding:"3px 8px",color:"#fff",cursor:"pointer",fontSize:10,flexShrink:0}}>Copy</button>
+                </div>
+              </div>
+              <div style={{color:D.dim,fontSize:11,marginTop:6}}>→ Paste the URL it gives you into the address bar above</div>
             </div>
-            <button onClick={() => navigate("https://www.google.com")} style={{background:D.ac,border:"none",borderRadius:8,padding:"8px 16px",color:"#fff",cursor:"pointer",fontSize:13}}>🌐 Browse Web Instead</button>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap",justifyContent:"center"}}>
+              <button onClick={() => navigate("https://www.google.com")} style={{background:D.ac,border:"none",borderRadius:8,padding:"8px 14px",color:"#fff",cursor:"pointer",fontSize:12}}>🌐 Browse Web</button>
+              <button onClick={() => window.open(url,"_blank")} style={{background:`${D.grn}22`,border:`1px solid ${D.grn}`,borderRadius:8,padding:"8px 14px",color:D.grn,cursor:"pointer",fontSize:12}}>↗ Try Anyway</button>
+            </div>
           </div>
         )}
         {loading && !blocked && (
@@ -1134,7 +1181,7 @@ function DeployModal({onClose}) {
 // MAIN APP
 // ════════════════════════════════════════════════════════════
 export default function App() {
-  const [tree,      setTree]    = useState(() => [{id:"root",name:"My Projects",type:"F",open:true,children:[]}]);
+  const [tree,      setTree]    = useState(() => []);
   const [files,     setFiles]   = useState(() => ({}));
   const [fmap,      setFmap]    = useState(() => ({}));
   const [tabs,      setTabs]    = useState([]);
@@ -1178,18 +1225,46 @@ export default function App() {
     }
   }, []);
 
-  // load from IndexedDB on start
+  // load from IndexedDB — rebuild proper folder tree
   useEffect(() => {
     dbLoadAll().then((rows) => {
       if (!rows.length) return;
       const loaded = {};
       rows.forEach((r) => { loaded[r.path] = r.content; });
-      setFiles((f) => ({...f,...loaded}));
-      rows.forEach((r) => {
+      setFiles(() => loaded);
+      let newTree = [];
+      const folderIds = {};
+      const newFmap = {};
+      const ensureDir = (parts) => {
+        const path = parts.join("/");
+        if (folderIds[path]) return folderIds[path];
         const id = uid();
-        setFmap((m) => ({...m,[id]:r.path}));
-        setTree((t) => ins(t,"root",{id,name:r.path.split("/").pop(),type:"f"}));
+        folderIds[path] = id;
+        const node = {id, name:parts[parts.length-1], type:"F", open:true, children:[]};
+        if (parts.length === 1) {
+          newTree = [...newTree, node];
+        } else {
+          const pid = ensureDir(parts.slice(0,-1));
+          const add = (ns) => ns.map((n) => n.id===pid ? {...n,children:[...n.children,node]} : n.children ? {...n,children:add(n.children)} : n);
+          newTree = add(newTree);
+        }
+        return id;
+      };
+      rows.forEach((r) => {
+        const parts = r.path.split("/");
+        const id = uid();
+        newFmap[id] = r.path;
+        const node = {id, name:parts[parts.length-1], type:"f"};
+        if (parts.length === 1) {
+          newTree = [...newTree, node];
+        } else {
+          const pid = ensureDir(parts.slice(0,-1));
+          const add = (ns) => ns.map((n) => n.id===pid ? {...n,children:[...n.children,node]} : n.children ? {...n,children:add(n.children)} : n);
+          newTree = add(newTree);
+        }
       });
+      setTree(() => newTree);
+      setFmap(() => newFmap);
     });
   }, []);
 
@@ -1720,8 +1795,8 @@ export default function App() {
             </div>
           )}
 
-          {/* Editor / Welcome */}
-          <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+          {/* Editor / Welcome + Browser side panel */}
+          <div style={{flex:1,display:"flex",overflow:"hidden",flexDirection:"row"}}>
             <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
               {active
                 ? <Editor filename={active} content={files[active]||""} onChange={(v) => edit(active,v)} fontSize={fs}/>
@@ -1764,12 +1839,9 @@ export default function App() {
                 </div>
               </>
             )}
+            {/* RK Browser — right side inside the row */}
+            {browser && !browserFS && <BrowserPanel url={browser} width={browserH} onWidthChange={setBrowserH} onClose={()=>{setBrowser(null);setBrowserFS(false);}} onFS={()=>setBrowserFS(true)}/>}
           </div>
-
-          {/* RK Browser panel */}
-          {browser && !browserFS && (
-            <RKBrowser url={browser} onClose={() => { setBrowser(null); setBrowserFS(false); }} height={browserH} onHeightChange={setBrowserH} fullscreen={false} onToggleFS={() => setBrowserFS(true)}/>
-          )}
 
           {/* Terminal */}
           {termOpen && (
